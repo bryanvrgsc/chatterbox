@@ -1,10 +1,25 @@
 import random
 import warnings
 import os
+import shutil
 import numpy as np
 import torch
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES
 import gradio as gr
+
+# === CONFIGURACIÓN Y CONSTANTES ===
+MAX_CHARS = 10000
+CHUNK_SIZE = 400  # Max 400 chars per chunk (model's native limit)
+
+# --- OPTIMIZACIÓN: Procesamiento paralelo de chunks ---
+ENABLE_PARALLEL_CHUNKS = False  # Cambiar a True para activar (experimental)
+PARALLEL_WORKERS = 2  # Número de chunks a procesar en paralelo
+
+# --- GESTIÓN DE MEMORIA GPU ---
+USE_GPU_EMPTY_CACHE = False  # Cambiar a False para desactivar
+
+# --- LIMPIEZA DE CACHÉ ---
+AUTO_CLEAN_CACHE = True  # Cambiar a False para desactivar limpieza automática
 
 # === OPTIMIZACIONES DE RENDIMIENTO ===
 # Suprimir warnings no críticos para limpiar output
@@ -140,25 +155,6 @@ LANGUAGE_CONFIG = {
     },
 }
 
-# --- Constants ---
-MAX_CHARS = 10000
-CHUNK_SIZE = 400  # Max 400 chars per chunk (model's native limit)
-
-# === OPTIMIZACIÓN 3: Procesamiento paralelo de chunks ===
-# ADVERTENCIA: El procesamiento paralelo puede causar problemas si el modelo tiene estado
-# Solo activa esto si tienes GPU potente y el modelo lo soporta
-ENABLE_PARALLEL_CHUNKS = False  # Cambiar a True para activar (experimental)
-PARALLEL_WORKERS = 2  # Número de chunks a procesar en paralelo
-
-# === GESTIÓN DE MEMORIA GPU ===
-# Controla si se libera memoria GPU/MPS con empty_cache()
-# Desactivar si causa problemas de rendimiento
-USE_GPU_EMPTY_CACHE = False  # Cambiar a False para desactivar
-
-# === LIMPIEZA DE CACHÉ ===
-# Controla si se limpia caché al finalizar cada generación
-AUTO_CLEAN_CACHE = True  # Cambiar a False para desactivar limpieza automática
-
 # --- UI Helpers ---
 def default_audio_for_ui(lang: str) -> str | None:
     return LANGUAGE_CONFIG.get(lang, {}).get("audio")
@@ -219,15 +215,22 @@ def get_or_load_model():
 # === OPTIMIZACIÓN 2: Caché de embeddings ===
 EMBEDDING_CACHE = {}
 
-def get_audio_embedding(audio_path: str, model):
+def get_audio_embedding(audio_path: str, exaggeration: float, model):
     """Obtiene el embedding de audio con caché para evitar recomputación."""
-    if audio_path in EMBEDDING_CACHE:
-        return EMBEDDING_CACHE[audio_path]
+    cache_key = (audio_path, exaggeration)
+    if cache_key in EMBEDDING_CACHE:
+        return EMBEDDING_CACHE[cache_key]
     
-    # Computar embedding (esto debería hacerlo el modelo internamente)
-    # Por ahora, solo retornamos None y el modelo lo manejará
-    # Esta función se puede expandir si el modelo expone la función de embedding
-    return None
+    print(f"🎙️ Computando embedding para: {audio_path.split('/')[-1]} (exaggeration: {exaggeration})")
+    try:
+        # Esto prepara los condicionales dentro del modelo
+        model.prepare_conditionals(audio_path, exaggeration=exaggeration)
+        # Guardamos una copia del objeto conds (que contiene los tensores del embedding)
+        EMBEDDING_CACHE[cache_key] = model.conds
+        return model.conds
+    except Exception as e:
+        print(f"⚠️ Error al preparar embedding: {e}")
+        return None
 
 
 # Attempt to load the model at startup.
@@ -301,8 +304,10 @@ def generate_audio(
     temperature_input: float = 0.8,
     seed_num_input: int = 0,
     cfg_weight_input: float = 0.5,
+    repetition_penalty_input: float = 2.0,
+    min_p_input: float = 0.05,
     progress=gr.Progress()
-) -> tuple[int, np.ndarray]:
+) -> str:
     """
     Generate audio for the given text using the TTS model.
     Supports long texts by processing them in chunks (up to 10,000 characters).
@@ -323,16 +328,28 @@ def generate_audio(
     if seed_num_input != 0:
         set_seed(int(seed_num_input))
 
-    # Resolve audio prompt
+    # Resolve audio prompt and embedding
     chosen_prompt = audio_prompt_path_input or default_audio_for_ui(language_id)
-
+    
+    # === USO DE CACHÉ DE EMBEDDINGS ===
+    if chosen_prompt:
+        embedding = get_audio_embedding(chosen_prompt, exaggeration_input, current_model)
+        if embedding:
+            current_model.conds = embedding
+    
     generate_kwargs = {
         "exaggeration": exaggeration_input,
         "temperature": temperature_input,
         "cfg_weight": cfg_weight_input,
+        "repetition_penalty": repetition_penalty_input,
+        "min_p": min_p_input,
     }
-    if chosen_prompt:
-        generate_kwargs["audio_prompt_path"] = chosen_prompt
+    # NO pasamos audio_prompt_path porque ya seteamos current_model.conds manualmente vía caché
+    # Si lo pasamos, el modelo volvería a llamar a prepare_conditionals internamente
+    # No obstante, si el embedding falló, dejamos que el modelo lo intente cargar normalmente
+    if not chosen_prompt:
+         # Si no hay prompt, el modelo podría fallar si no tiene conds
+         pass
 
     # Split text into chunks
     chunks = split_text_into_chunks(text_input)
@@ -453,21 +470,24 @@ def generate_audio(
         
         try:
             # 1. Limpiar archivos temporales de Gradio (excepto el audio generado)
+            # Usamos glob para encontrar directorios temporales de Gradio
             gradio_temp_dirs = glob.glob("/private/var/folders/*/T/gradio/*")
             for temp_dir in gradio_temp_dirs:
-                if temp_file.name not in temp_dir:  # No borrar el archivo que acabamos de crear
+                if os.path.isdir(temp_dir) and temp_file.name not in temp_dir:
                     try:
-                        subprocess.run(['rm', '-rf', temp_dir], check=False, capture_output=True)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
                     except:
                         pass
             
             # 2. NO BORRAR modelos de Huggingface - solo limpiar lockfiles y temp
             hf_cache = os.path.expanduser('~/.cache/huggingface')
             if os.path.exists(hf_cache):
+                # Usamos find via subprocess para eficiencia en árboles grandes
+                # NO usar capture_output junto con stdout/stderr para evitar conflictos
                 subprocess.run(['find', hf_cache, '-name', '*.lock', '-delete'], 
-                              check=False, capture_output=True, stderr=subprocess.DEVNULL)
-                subprocess.run(['find', hf_cache, '-name', 'tmp*', '-delete'], 
-                              check=False, capture_output=True, stderr=subprocess.DEVNULL)
+                              check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['find', hf_cache, '-type', 'f', '-name', 'tmp*', '-delete'], 
+                              check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # 3. Limpiar solo tarballs de conda (mantener paquetes instalados)
             subprocess.Popen(['conda', 'clean', '--tarballs', '-y'], 
@@ -479,7 +499,7 @@ def generate_audio(
             
             print(f"✅ Caché temporal limpiada (modelos preservados)")
         except Exception as e:
-            print(f"⚠️  Error limpiando caché: {e}")
+            print(f"⚠️ Error limpiando caché: {e}")
 
     
     
@@ -543,6 +563,8 @@ with gr.Blocks() as demo:
             with gr.Accordion("⚙️ Advanced Options", open=False):
                 seed_num = gr.Number(value=0, label="Random Seed (0 = random)")
                 temp = gr.Slider(0.05, 5, step=0.05, label="Temperature", value=0.8)
+                repetition_penalty = gr.Slider(1.0, 10.0, step=0.1, label="Repetition Penalty", value=2.0)
+                min_p = gr.Slider(0.01, 0.5, step=0.01, label="Min P", value=0.05)
 
         with gr.Column(scale=2):
             text = gr.Textbox(
@@ -576,6 +598,8 @@ with gr.Blocks() as demo:
             temp,
             seed_num,
             cfg_weight,
+            repetition_penalty,
+            min_p,
         ],
         outputs=[audio_output],
     )
