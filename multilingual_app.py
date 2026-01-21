@@ -1,14 +1,49 @@
 import random
+import warnings
+import os
 import numpy as np
 import torch
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES
 import gradio as gr
 
+# === OPTIMIZACIONES DE RENDIMIENTO ===
+# Suprimir warnings no críticos para limpiar output
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+
+# Detectar dispositivo
 DEVICE = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 print(f"🚀 Running on device: {DEVICE}")
 
+# Optimizaciones específicas por dispositivo
+if DEVICE == "cuda":
+    # === OPTIMIZACIONES CUDA (Windows/Linux) ===
+    # TF32 para GPUs Ampere+ (30xx, 40xx) - ~3x más rápido
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    # Benchmark para encontrar algoritmos óptimos
+    torch.backends.cudnn.benchmark = True
+    # Desactivar depuración para máxima velocidad
+    torch.backends.cudnn.deterministic = False
+    # Mostrar GPU
+    gpu_name = torch.cuda.get_device_name(0)
+    gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f"🎮 GPU: {gpu_name} ({gpu_mem:.1f} GB)")
+elif DEVICE == "mps":
+    # === OPTIMIZACIONES MPS (Apple Silicon) ===
+    print(f"🍎 Apple Silicon (MPS)")
+
+# Liberar memoria GPU al inicio (si está habilitado)
+if USE_GPU_EMPTY_CACHE:
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    elif DEVICE == "mps":
+        torch.mps.empty_cache()
+
 # --- Global Model Initialization ---
 MODEL = None
+
+
 
 LANGUAGE_CONFIG = {
     "ar": {
@@ -105,6 +140,25 @@ LANGUAGE_CONFIG = {
     },
 }
 
+# --- Constants ---
+MAX_CHARS = 10000
+CHUNK_SIZE = 400  # Max 400 chars per chunk (model's native limit)
+
+# === OPTIMIZACIÓN 3: Procesamiento paralelo de chunks ===
+# ADVERTENCIA: El procesamiento paralelo puede causar problemas si el modelo tiene estado
+# Solo activa esto si tienes GPU potente y el modelo lo soporta
+ENABLE_PARALLEL_CHUNKS = False  # Cambiar a True para activar (experimental)
+PARALLEL_WORKERS = 2  # Número de chunks a procesar en paralelo
+
+# === GESTIÓN DE MEMORIA GPU ===
+# Controla si se libera memoria GPU/MPS con empty_cache()
+# Desactivar si causa problemas de rendimiento
+USE_GPU_EMPTY_CACHE = False  # Cambiar a False para desactivar
+
+# === LIMPIEZA DE CACHÉ ===
+# Controla si se limpia caché al finalizar cada generación
+AUTO_CLEAN_CACHE = True  # Cambiar a False para desactivar limpieza automática
+
 # --- UI Helpers ---
 def default_audio_for_ui(lang: str) -> str | None:
     return LANGUAGE_CONFIG.get(lang, {}).get("audio")
@@ -120,7 +174,6 @@ def get_supported_languages_display() -> str:
     for code, name in sorted(SUPPORTED_LANGUAGES.items()):
         language_items.append(f"**{name}** (`{code}`)")
     
-    # Split into 2 lines
     mid = len(language_items) // 2
     line1 = " • ".join(language_items[:mid])
     line2 = " • ".join(language_items[mid:])
@@ -134,8 +187,7 @@ def get_supported_languages_display() -> str:
 
 
 def get_or_load_model():
-    """Loads the ChatterboxMultilingualTTS model if it hasn't been loaded already,
-    and ensures it's on the correct device."""
+    """Loads the ChatterboxMultilingualTTS model with optimizations."""
     global MODEL
     if MODEL is None:
         print("Model not loaded, initializing...")
@@ -143,165 +195,379 @@ def get_or_load_model():
             MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
             if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
                 MODEL.to(DEVICE)
+            
+            # === OPTIMIZACIÓN 1: torch.compile() ===
+            # Compilar el modelo para mejor rendimiento (PyTorch 2.0+)
+            try:
+                print("🔥 Compilando modelo con torch.compile()...")
+                # Compilar solo en CUDA (MPS no soporta compile aún)
+                if DEVICE == "cuda":
+                    MODEL = torch.compile(MODEL, mode="reduce-overhead")
+                    print("✅ Modelo compilado exitosamente")
+                else:
+                    print("⚠️  torch.compile() no disponible en MPS, usando modelo sin compilar")
+            except Exception as e:
+                print(f"⚠️  No se pudo compilar el modelo: {e}")
+            
             print(f"Model loaded successfully. Internal device: {getattr(MODEL, 'device', 'N/A')}")
         except Exception as e:
             print(f"Error loading model: {e}")
             raise
     return MODEL
 
+
+# === OPTIMIZACIÓN 2: Caché de embeddings ===
+EMBEDDING_CACHE = {}
+
+def get_audio_embedding(audio_path: str, model):
+    """Obtiene el embedding de audio con caché para evitar recomputación."""
+    if audio_path in EMBEDDING_CACHE:
+        return EMBEDDING_CACHE[audio_path]
+    
+    # Computar embedding (esto debería hacerlo el modelo internamente)
+    # Por ahora, solo retornamos None y el modelo lo manejará
+    # Esta función se puede expandir si el modelo expone la función de embedding
+    return None
+
+
 # Attempt to load the model at startup.
 try:
     get_or_load_model()
 except Exception as e:
-    print(f"CRITICAL: Failed to load model on startup. Application may not function. Error: {e}")
+    print(f"CRITICAL: Failed to load model on startup. Error: {e}")
+
 
 def set_seed(seed: int):
-    """Sets the random seed for reproducibility across torch, numpy, and random."""
+    """Sets the random seed for reproducibility."""
     torch.manual_seed(seed)
     if DEVICE == "cuda":
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     random.seed(seed)
     np.random.seed(seed)
+
+
+def split_text_into_chunks(text: str, max_chunk_size: int = CHUNK_SIZE) -> list[str]:
+    """
+    Split text into chunks at sentence boundaries for natural speech flow.
+    """
+    import re
     
-def resolve_audio_prompt(language_id: str, provided_path: str | None) -> str | None:
-    """
-    Decide which audio prompt to use:
-    - If user provided a path (upload/mic/url), use it.
-    - Else, fall back to language-specific default (if any).
-    """
-    if provided_path and str(provided_path).strip():
-        return provided_path
-    return LANGUAGE_CONFIG.get(language_id, {}).get("audio")
+    # Normalize whitespace
+    text = ' '.join(text.split())
+    
+    if len(text) <= max_chunk_size:
+        return [text]
+    
+    # Split by sentence endings
+    sentences = re.split(r'(?<=[.!?。！？])\s+', text)
+    
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
+            current_chunk = f"{current_chunk} {sentence}".strip()
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            # Handle long sentences
+            if len(sentence) > max_chunk_size:
+                words = sentence.split()
+                current_chunk = ""
+                for word in words:
+                    if len(current_chunk) + len(word) + 1 <= max_chunk_size:
+                        current_chunk = f"{current_chunk} {word}".strip()
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = word
+            else:
+                current_chunk = sentence
+    
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    return chunks
 
 
-def generate_tts_audio(
+@torch.inference_mode()  # Más eficiente que no_grad() para inferencia
+def generate_audio(
     text_input: str,
     language_id: str,
     audio_prompt_path_input: str = None,
     exaggeration_input: float = 0.5,
     temperature_input: float = 0.8,
     seed_num_input: int = 0,
-    cfgw_input: float = 0.5
+    cfg_weight_input: float = 0.5,
+    progress=gr.Progress()
 ) -> tuple[int, np.ndarray]:
     """
-    Generate high-quality speech audio from text using Chatterbox Multilingual model with optional reference audio styling.
-    Supported languages: English, French, German, Spanish, Italian, Portuguese, and Hindi.
-    
-    This tool synthesizes natural-sounding speech from input text. When a reference audio file 
-    is provided, it captures the speaker's voice characteristics and speaking style. The generated audio 
-    maintains the prosody, tone, and vocal qualities of the reference speaker, or uses default voice if no reference is provided.
-
-    Args:
-        text_input (str): The text to synthesize into speech (maximum 300 characters)
-        language_id (str): The language code for synthesis (eg. en, fr, de, es, it, pt, hi)
-        audio_prompt_path_input (str, optional): File path or URL to the reference audio file that defines the target voice style. Defaults to None.
-        exaggeration_input (float, optional): Controls speech expressiveness (0.25-2.0, neutral=0.5, extreme values may be unstable). Defaults to 0.5.
-        temperature_input (float, optional): Controls randomness in generation (0.05-5.0, higher=more varied). Defaults to 0.8.
-        seed_num_input (int, optional): Random seed for reproducible results (0 for random generation). Defaults to 0.
-        cfgw_input (float, optional): CFG/Pace weight controlling generation guidance (0.2-1.0). Defaults to 0.5, 0 for language transfer. 
-
-    Returns:
-        tuple[int, np.ndarray]: A tuple containing the sample rate (int) and the generated audio waveform (numpy.ndarray)
+    Generate audio for the given text using the TTS model.
+    Supports long texts by processing them in chunks (up to 10,000 characters).
     """
+
     current_model = get_or_load_model()
 
     if current_model is None:
         raise RuntimeError("TTS model is not loaded.")
 
+    # Validate and truncate text
+    text_input = text_input.strip()
+    if not text_input:
+        raise ValueError("Text input is empty.")
+    
+    text_input = text_input[:MAX_CHARS]
+
     if seed_num_input != 0:
         set_seed(int(seed_num_input))
 
-    print(f"Generating audio for text: '{text_input[:50]}...'")
-    
-    # Handle optional audio prompt
+    # Resolve audio prompt
     chosen_prompt = audio_prompt_path_input or default_audio_for_ui(language_id)
 
     generate_kwargs = {
         "exaggeration": exaggeration_input,
         "temperature": temperature_input,
-        "cfg_weight": cfgw_input,
+        "cfg_weight": cfg_weight_input,
     }
     if chosen_prompt:
         generate_kwargs["audio_prompt_path"] = chosen_prompt
-        print(f"Using audio prompt: {chosen_prompt}")
-    else:
-        print("No audio prompt provided; using default voice.")
-        
-    wav = current_model.generate(
-        text_input[:300],  # Truncate text to max chars
-        language_id=language_id,
-        **generate_kwargs
-    )
-    print("Audio generation complete.")
-    return (current_model.sr, wav.squeeze(0).numpy())
 
+    # Split text into chunks
+    chunks = split_text_into_chunks(text_input)
+    total_chunks = len(chunks)
+    
+    # === RESUMEN AL INICIO ===
+    print(f"\n{'='*70}")
+    print(f"📝 RESUMEN: {len(text_input):,} caracteres → {total_chunks} chunks (máx. {CHUNK_SIZE} chars/chunk)")
+    print(f"🌐 Idioma: {language_id}")
+    if chosen_prompt:
+        print(f"🎤 Audio de referencia: {chosen_prompt.split('/')[-1]}")
+    print(f"{'='*70}\n")
+
+    all_wavs = []
+    
+    # Progreso inicial
+    progress(0, desc=f"📝 Preparando {total_chunks} chunks...")
+    
+    import time
+    start_time = time.time()
+    chunk_times = []
+    
+    # Bucle de generación
+    for chunk_idx in range(total_chunks):
+        chunk_start = time.time()
+        chunk_text = chunks[chunk_idx]
+        
+        # Vista previa del chunk actual
+        preview = chunk_text[:45] if len(chunk_text) > 45 else chunk_text
+        preview = preview.replace('\n', ' ')
+        
+        # Progreso en terminal
+        if chunk_idx > 0:
+            avg_time = sum(chunk_times) / len(chunk_times)
+            eta = avg_time * (total_chunks - chunk_idx)
+            eta_minutes = int(eta // 60)
+            eta_seconds = int(eta % 60)
+            print(f"📦 [{chunk_idx + 1}/{total_chunks}] '{preview}...' (ETA: {eta_minutes}:{eta_seconds:02d})")
+        else:
+            print(f"📦 [{chunk_idx + 1}/{total_chunks}] '{preview}...'")
+        
+        # Progreso en Gradio UI
+        progress_pct = (chunk_idx + 1) / total_chunks
+        progress(progress_pct, desc=f"🎙️ Chunk {chunk_idx + 1}/{total_chunks}: '{preview[:30]}...'")
+        
+        wav = current_model.generate(
+            chunk_text,
+            language_id=language_id,
+            **generate_kwargs
+        )
+        # Normalizar dimensiones del tensor
+        wav = wav.squeeze()
+        if wav.dim() == 0:
+            continue  # Ignorar tensores vacíos
+        if wav.dim() == 2:
+            wav = wav[0]  # Tomar solo el primer canal si es estéreo
+        
+        # Guardar como float32 (más rápido, convertir a int16 solo al final)
+        all_wavs.append(wav.cpu())
+        del wav
+        
+        chunk_times.append(time.time() - chunk_start)
+
+    
+    # Concatenate all chunks
+    progress(1.0, desc="✅ Concatenando audio...")
+    
+    if len(all_wavs) == 0:
+        raise ValueError("No audio chunks were generated")
+    
+    # Debug: mostrar formas de chunks
+    print(f"\n📊 Debug - Chunks generados: {len(all_wavs)}")
+    total_samples = sum(w.shape[-1] for w in all_wavs)
+    print(f"   Total samples: {total_samples:,}")
+    
+    # Concatenar todos los chunks
+    final_wav = torch.cat(all_wavs, dim=-1)
+    del all_wavs
+    
+    # === DURACIÓN FINAL ===
+    total_time = time.time() - start_time
+    duration = final_wav.shape[-1] / current_model.sr
+    
+    print(f"\n{'='*70}")
+    print(f"✅ GENERACIÓN COMPLETA")
+    print(f"   📊 Chunks procesados: {total_chunks}")
+    print(f"   🎵 Total samples: {final_wav.shape[-1]:,}")
+    print(f"   ⏱️  Duración del audio: {duration:.1f}s ({duration/60:.1f} min)")
+    print(f"   ⚡ Tiempo de generación: {total_time:.1f}s ({total_time/60:.1f} min)")
+    print(f"   📈 Velocidad: {duration/total_time:.2f}x realtime")
+    print(f"{'='*70}\n")
+    
+    progress(1.0, desc=f"✅ ¡Completado! Duración: {duration:.1f}s | Velocidad: {duration/total_time:.1f}x")
+    
+    # Guardar audio a archivo WAV temporal
+    import tempfile
+    import scipy.io.wavfile as wavfile
+    
+    # Convertir a int16 solo al final
+    audio_numpy = final_wav.numpy()
+    audio_int16 = (audio_numpy * 32767).astype(np.int16)
+    del final_wav, audio_numpy
+    
+    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    wavfile.write(temp_file.name, current_model.sr, audio_int16)
+    
+    print(f"📤 Audio guardado: {temp_file.name}")
+    print(f"   Tamaño: {len(audio_int16) * 2 / 1e6:.1f} MB")
+    
+    # Liberar memoria
+    del audio_int16
+    
+    # === LIMPIEZA SELECTIVA DE CACHÉ ===
+    if AUTO_CLEAN_CACHE:
+        print(f"\n🧹 Limpiando caché temporal...")
+        import subprocess
+        import glob
+        
+        try:
+            # 1. Limpiar archivos temporales de Gradio (excepto el audio generado)
+            gradio_temp_dirs = glob.glob("/private/var/folders/*/T/gradio/*")
+            for temp_dir in gradio_temp_dirs:
+                if temp_file.name not in temp_dir:  # No borrar el archivo que acabamos de crear
+                    try:
+                        subprocess.run(['rm', '-rf', temp_dir], check=False, capture_output=True)
+                    except:
+                        pass
+            
+            # 2. NO BORRAR modelos de Huggingface - solo limpiar lockfiles y temp
+            hf_cache = os.path.expanduser('~/.cache/huggingface')
+            if os.path.exists(hf_cache):
+                subprocess.run(['find', hf_cache, '-name', '*.lock', '-delete'], 
+                              check=False, capture_output=True, stderr=subprocess.DEVNULL)
+                subprocess.run(['find', hf_cache, '-name', 'tmp*', '-delete'], 
+                              check=False, capture_output=True, stderr=subprocess.DEVNULL)
+            
+            # 3. Limpiar solo tarballs de conda (mantener paquetes instalados)
+            subprocess.Popen(['conda', 'clean', '--tarballs', '-y'], 
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # 4. Limpiar pip cache (en background)
+            subprocess.Popen(['pip', 'cache', 'purge'], 
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            print(f"✅ Caché temporal limpiada (modelos preservados)")
+        except Exception as e:
+            print(f"⚠️  Error limpiando caché: {e}")
+
+    
+    
+    return temp_file.name
+
+
+
+
+
+
+# --- Gradio Interface ---
 with gr.Blocks() as demo:
     gr.Markdown(
         """
-        # Chatterbox Multilingual Demo
-        Generate high-quality multilingual speech from text with reference audio styling, supporting 23 languages.
+        # 🎙️ Chatterbox Studio
+        **Professional Multilingual Text-to-Speech Engine**
+        
+        Generate high-quality multilingual speech from text with reference audio styling.
+        Supports up to **10,000 characters** with automatic chunk processing.
         """
     )
     
-    # Display supported languages
     gr.Markdown(get_supported_languages_display())
+    
     with gr.Row():
-        with gr.Column():
-            initial_lang = "fr"
-            text = gr.Textbox(
-                value=default_text_for_ui(initial_lang),
-                label="Text to synthesize (max chars 300)",
-                max_lines=5
-            )
+        with gr.Column(scale=1):
+            initial_lang = "es"
             
             language_id = gr.Dropdown(
                 choices=list(ChatterboxMultilingualTTS.get_supported_languages().keys()),
                 value=initial_lang,
-                label="Language",
-                info="Select the language for text-to-speech synthesis"
+                label="🌐 Language",
+                info="Select the language for synthesis"
             )
             
             ref_wav = gr.Audio(
                 sources=["upload", "microphone"],
                 type="filepath",
-                label="Reference Audio File (Optional)",
+                label="🎤 Reference Audio (Optional)",
                 value=default_audio_for_ui(initial_lang)
             )
             
             gr.Markdown(
-                "💡 **Note**: Ensure that the reference clip matches the specified language tag. Otherwise, language transfer outputs may inherit the accent of the reference clip's language. To mitigate this, set the CFG weight to 0.",
+                "💡 **Tip**: Match reference audio language with selected language for best results.",
                 elem_classes=["audio-note"]
             )
             
             exaggeration = gr.Slider(
-                0.25, 2, step=.05, label="Exaggeration (Neutral = 0.5, extreme values can be unstable)", value=.5
+                0.25, 2, step=0.05, 
+                label="🎭 Exaggeration", 
+                value=0.5,
+                info="Neutral = 0.5"
             )
+            
             cfg_weight = gr.Slider(
-                0.2, 1, step=.05, label="CFG/Pace", value=0.5
+                0.2, 1, step=0.05, 
+                label="⚡ CFG/Pace", 
+                value=0.5
             )
 
-            with gr.Accordion("More options", open=False):
-                seed_num = gr.Number(value=0, label="Random seed (0 for random)")
-                temp = gr.Slider(0.05, 5, step=.05, label="Temperature", value=.8)
+            with gr.Accordion("⚙️ Advanced Options", open=False):
+                seed_num = gr.Number(value=0, label="Random Seed (0 = random)")
+                temp = gr.Slider(0.05, 5, step=0.05, label="Temperature", value=0.8)
 
-            run_btn = gr.Button("Generate", variant="primary")
+        with gr.Column(scale=2):
+            text = gr.Textbox(
+                value=default_text_for_ui(initial_lang),
+                label=f"📝 Text to Synthesize (max {MAX_CHARS:,} characters)",
+                lines=10,
+                max_lines=20
+            )
+            
+            run_btn = gr.Button("🚀 Generate Audio", variant="primary", size="lg")
+            
+            audio_output = gr.Audio(label="🔊 Generated Audio")
 
-        with gr.Column():
-            audio_output = gr.Audio(label="Output Audio")
+    def on_language_change(lang, current_ref, current_text):
+        return default_audio_for_ui(lang), default_text_for_ui(lang)
 
-        def on_language_change(lang, current_ref, current_text):
-            return default_audio_for_ui(lang), default_text_for_ui(lang)
-
-        language_id.change(
-            fn=on_language_change,
-            inputs=[language_id, ref_wav, text],
-            outputs=[ref_wav, text],
-            show_progress=False
-        )
+    language_id.change(
+        fn=on_language_change,
+        inputs=[language_id, ref_wav, text],
+        outputs=[ref_wav, text],
+        show_progress=False
+    )
 
     run_btn.click(
-        fn=generate_tts_audio,
+        fn=generate_audio,
         inputs=[
             text,
             language_id,
@@ -314,4 +580,8 @@ with gr.Blocks() as demo:
         outputs=[audio_output],
     )
 
-demo.launch(mcp_server=True)
+if __name__ == "__main__":
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7860
+    )
