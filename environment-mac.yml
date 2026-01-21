@@ -1,0 +1,40 @@
+# Chatterbox TTS - macOS (Apple Silicon) Environment
+# Optimized for MPS acceleration and production stability
+name: chatterbox-mac
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python (Best compatibility with NumPy 1.26.x)
+  - python=3.11
+  
+  # PyTorch Stack (MPS-optimized)
+  - pytorch==2.6.0
+  - torchaudio==2.6.0
+  
+  # Core Dependencies
+  - numpy==1.26.4
+  - librosa=0.11.0
+  - omegaconf
+  
+  # ML/AI Libraries
+  - transformers==4.46.3
+  - safetensors==0.5.3
+  
+  # Development Tools
+  - pip
+  
+  # Pip Dependencies
+  - pip:
+    - diffusers==0.31.0
+    - gradio==5.44.1
+    - pykakasi==2.3.0
+    - pyloudnorm
+    - s3tokenizer
+    - resemble-perth==1.0.1
+    - conformer==0.3.2
+    - spacy-pkuseg
+    - peft
+    - -e .  # Install chatterbox-tts in editable mode

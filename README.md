@@ -30,20 +30,101 @@ Choose the right model for your application.
 | Chatterbox-Multilingual [(Language list)](#supported-languages)                                                 | 500M | 23+ | Zero-shot cloning, Multiple Languages                   | Global applications, Localization            | [Demo](https://huggingface.co/spaces/ResembleAI/Chatterbox-Multilingual-TTS) | [Listen](https://resemble-ai.github.io/chatterbox_demopage/) |
 | Chatterbox [(Tips and Tricks)](#original-chatterbox-tips)                                                       | 500M | English | CFG & Exaggeration tuning                               | General zero-shot TTS with creative controls | [Demo](https://huggingface.co/spaces/ResembleAI/Chatterbox)              | [Listen](https://resemble-ai.github.io/chatterbox_demopage/) |
 
+## System Requirements
+
+### Minimum Requirements
+- **OS**: Windows 11, macOS 12+, or Linux (Ubuntu 20.04+, Debian 11+)
+- **Python**: 3.11 or higher
+- **RAM**: 8 GB minimum, 16 GB recommended
+- **Storage**: 5 GB free space for models and dependencies
+
+### GPU Requirements (Optional but Recommended)
+
+#### Windows 11
+- **NVIDIA GPU**: GTX 1060 or newer
+- **CUDA Toolkit**: 12.6+ or 13.0+ ([Download](https://developer.nvidia.com/cuda-downloads))
+- **cuDNN**: 9.10+ ([Download](https://developer.nvidia.com/cudnn))
+- **VRAM**: 6 GB minimum, 8 GB+ recommended
+- **Drivers**: Latest NVIDIA drivers (560.94+ recommended)
+
+**Installation Steps for Windows 11:**
+1. Install Visual Studio 2022 Build Tools (required for PyTorch)
+2. Install CUDA Toolkit 13.1 or 12.6
+3. Install cuDNN 9.10+
+4. Update GPU drivers to latest version
+5. Follow installation instructions below
+
+#### macOS (Apple Silicon)
+- **Hardware**: M1, M2, M3, or M4 chip
+- **macOS**: 12.0 (Monterey) or newer
+- **Metal**: Built-in support (no additional installation needed)
+- **RAM**: 16 GB recommended for optimal performance
+
+#### Linux
+- **NVIDIA GPU**: GTX 1060 or newer
+- **CUDA Toolkit**: 12.6+ or 13.0+
+- **cuDNN**: 9.10+
+- **VRAM**: 6 GB minimum, 8 GB+ recommended
+
+### CPU-Only Mode
+Chatterbox can run on CPU without a GPU, though generation will be significantly slower:
+- **CPU**: Modern multi-core processor (Intel i5/AMD Ryzen 5 or better)
+- **RAM**: 16 GB minimum
+- **Expected Performance**: 5-10x slower than GPU mode
+
 ## Installation
+
+### Option 1: PyPI (Recommended for most users)
 ```shell
 pip install chatterbox-tts
 ```
 
-Alternatively, you can install from source:
-```shell
-# conda create -yn chatterbox python=3.11
-# conda activate chatterbox
+### Option 2: Conda Environment (Recommended for GPU users)
 
+We provide conda environment files for different platforms with PyTorch 2.9.1:
+
+**For NVIDIA GPUs with CUDA 13.0/13.1:**
+```shell
+git clone https://github.com/resemble-ai/chatterbox.git
+cd chatterbox
+conda env create -f environment.yml
+conda activate chatterbox
+```
+
+**For Mac (Apple Silicon M1/M2/M3/M4):**
+```shell
+git clone https://github.com/resemble-ai/chatterbox.git
+cd chatterbox
+conda env create -f environment-mac.yml
+conda activate chatterbox-mac
+```
+
+**For CPU-only systems:**
+```shell
+git clone https://github.com/resemble-ai/chatterbox.git
+cd chatterbox
+conda env create -f environment-cpu.yml
+conda activate chatterbox-cpu
+```
+
+After creating the environment, verify your GPU setup:
+```shell
+python check_gpu.py
+```
+
+**To update an existing environment:**
+```shell
+conda activate chatterbox-mac
+conda env update -f environment-mac.yml --prune
+```
+
+### Option 3: Install from Source
+```shell
 git clone https://github.com/resemble-ai/chatterbox.git
 cd chatterbox
 pip install -e .
 ```
+
 We developed and tested Chatterbox on Python 3.11 on Debian 11 OS; the versions of the dependencies are pinned in `pyproject.toml` to ensure consistency. You can modify the code or dependencies in this installation mode.
 
 ## Usage
