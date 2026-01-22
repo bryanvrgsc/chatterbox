@@ -95,6 +95,81 @@ Chatterbox can run on CPU without a GPU, though generation will be significantly
 - **RAM**: 16 GB minimum
 - **Expected Performance**: 5-10x slower than GPU mode
 
+---
+
+## 🚀 Quick Start: Windows 11 with NVIDIA GPU (CUDA)
+
+This is the complete step-by-step guide to get Chatterbox running with GPU acceleration on Windows 11:
+
+### Prerequisites
+- Windows 11
+- NVIDIA GPU (GTX 1060 or newer)
+- [Anaconda](https://www.anaconda.com/download) or [Miniconda](https://docs.conda.io/en/latest/miniconda.html) installed
+- [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/) with "Desktop development with C++"
+- [CUDA Toolkit 12.6+](https://developer.nvidia.com/cuda-downloads)
+- [Latest NVIDIA Drivers](https://www.nvidia.com/download/index.aspx) (560.94+ recommended)
+
+### Installation Commands
+
+```shell
+# 1. Clone the repository
+git clone https://github.com/resemble-ai/chatterbox.git
+cd chatterbox
+
+# 2. Create conda environment from environment.yml
+conda env create -f environment.yml
+
+# 3. Activate the environment
+conda activate chatterbox
+
+# 4. Install cuDNN with CUDA 12 support
+conda install nvidia::cudnn cuda-version=12
+
+# 5. Install PyTorch 2.6.0 with CUDA 12.4 (if not already installed by environment.yml)
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+# 6. Verify GPU setup
+python check_gpu.py
+```
+
+### Expected Output
+
+After running `python check_gpu.py`, you should see:
+```
+🚀 Running on device: cuda
+🎮 GPU: NVIDIA GeForce RTX 3060 (12.0 GB)
+✅ GPU setup successful!
+```
+
+### Running the Demo
+
+```shell
+# Run the Gradio web interface
+python multilingual_app.py
+```
+
+Then open your browser at `http://127.0.0.1:7860`
+
+### Troubleshooting
+
+**If GPU is not detected:**
+1. Verify CUDA installation: `nvcc --version`
+2. Check PyTorch CUDA availability:
+   ```python
+   import torch
+   print(torch.cuda.is_available())  # Should return True
+   print(torch.version.cuda)  # Should show 12.4
+   ```
+3. Update NVIDIA drivers to latest version
+4. Reinstall PyTorch with CUDA 12.4 support
+
+**If out of memory errors occur:**
+- Close other GPU applications
+- Reduce batch size or text length
+- Use a GPU with more VRAM (8GB+ recommended)
+
+---
+
 ## Installation
 
 ### Option 1: PyPI (Recommended for most users)
