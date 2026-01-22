@@ -10,15 +10,7 @@ channels:
 dependencies:
   # Python
   - python=3.11
-  
-  # PyTorch Stack (CUDA 12.4)
-  - pytorch==2.6.0
-  - torchaudio==2.6.0
-  - pytorch-cuda=12.4
-  
-  # CUDA Toolkit
-  - cuda-toolkit=12.4
-  - cudnn
+
   
   # Core Dependencies
   - numpy==1.26.4
@@ -34,13 +26,16 @@ dependencies:
   
   # Pip Dependencies
   - pip:
-    - diffusers==0.31.0
-    - gradio==5.44.1
-    - pykakasi==2.3.0
-    - pyloudnorm
-    - s3tokenizer
-    - resemble-perth==1.0.1
-    - conformer==0.3.2
-    - spacy-pkuseg
-    - peft
-    - -e .  # Install chatterbox-tts in editable mode
+      - torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+      - torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+      - torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+      - diffusers==0.31.0
+      - gradio==5.44.1
+      - pykakasi==2.3.0
+      - pyloudnorm
+      - s3tokenizer
+      - resemble-perth==1.0.1
+      - conformer==0.3.2
+      - spacy-pkuseg
+      - peft
+      - -e .  # Install chatterbox-tts in editable mode
