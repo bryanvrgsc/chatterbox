@@ -4,19 +4,25 @@ import os
 import shutil
 import numpy as np
 import torch
+# --- CONFIGURACIÓN DE ESTABILIDAD DEL SISTEMA ---
+# Optimizado para: Windows (CUDA 12.4) & macOS (MPS)
+# Forzar fallback a CPU en macOS si una operación no está en MPS (evita crashes)
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+# Evitar fragmentación de memoria en CUDA 12.4+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES
 import gradio as gr
 
 # === CONFIGURACIÓN Y CONSTANTES ===
 MAX_CHARS = 10000
-CHUNK_SIZE = 400  # Max 400 chars per chunk (model's native limit)
+CHUNK_SIZE = 300  # Max 400 chars per chunk (model's native limit)
 
 # --- OPTIMIZACIÓN: Procesamiento paralelo de chunks ---
-ENABLE_PARALLEL_CHUNKS = False  # Cambiar a True para activar (experimental)
-PARALLEL_WORKERS = 2  # Número de chunks a procesar en paralelo
+ENABLE_PARALLEL_CHUNKS = False  # Desactivado para máxima estabilidad de VRAM y consistencia
+PARALLEL_WORKERS = 2  # Balanceado para 8GB VRAM
 
 # --- GESTIÓN DE MEMORIA GPU ---
-USE_GPU_EMPTY_CACHE = False  # Cambiar a False para desactivar
+USE_GPU_EMPTY_CACHE = True  # Activado para prevenir fragmentación en 8GB
 
 # --- LIMPIEZA DE CACHÉ ---
 AUTO_CLEAN_CACHE = True  # Cambiar a False para desactivar limpieza automática
@@ -36,21 +42,22 @@ print(f"🚀 Running on device: {DEVICE}")
 
 # Optimizaciones específicas por dispositivo
 if DEVICE == "cuda":
-    # === OPTIMIZACIONES CUDA (Windows/Linux) ===
+    # === OPTIMIZACIONES CUDA 12.4 (RTX 4070) ===
     # TF32 para GPUs Ampere+ (30xx, 40xx) - ~3x más rápido
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    # Benchmark para encontrar algoritmos óptimos
-    torch.backends.cudnn.benchmark = True
-    # Desactivar depuración para máxima velocidad
-    torch.backends.cudnn.deterministic = False
+    # Desactivar benchmark y activar modo determinista para máxima estabilidad
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True 
+    print("🛡️  CUDA 12.4 Stability Mode: ON")
     # Mostrar GPU
     gpu_name = torch.cuda.get_device_name(0)
     gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
     print(f"🎮 GPU: {gpu_name} ({gpu_mem:.1f} GB)")
 elif DEVICE == "mps":
     # === OPTIMIZACIONES MPS (Apple Silicon) ===
-    print(f"🍎 Apple Silicon (MPS)")
+    # MPS no tiene modo determinista explícito, pero el fallback ayuda a la estabilidad
+    print(f"🍎 Apple Silicon (MPS) - Fallback Enabled: {os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK')}")
 
 # Liberar memoria GPU al inicio (si está habilitado)
 if USE_GPU_EMPTY_CACHE:
@@ -271,42 +278,123 @@ def set_seed(seed: int):
     np.random.seed(seed)
 
 
+def preprocess_text(text: str) -> str:
+    """
+    Ultimate cleaning pipeline to avoid 'silence' and glitches in TTS.
+    """
+    import re
+    import unicodedata
+    
+    if not text:
+        return ""
+    
+    # 0. Normalización Unicode (VITAL para francés/español: combina e + ´ en é)
+    text = unicodedata.normalize('NFKC', text)
+    
+    # 1. Eliminar etiquetas HTML (evita que la IA intente leer código)
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # 2. Eliminar texto entre corchetes (notas, links de wikipedia, etc.)
+    text = re.sub(r'\[.*?\]', '', text)
+
+    # 3. Eliminar URLs
+    text = re.sub(r'http\S+|www\.\S+', '', text)
+    
+    # 4. Eliminar Emojis (manteniendo alfabetos globales)
+    text = re.sub(r'[^\x00-\x7F\u00C0-\u017F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF\u1100-\u11FF]+', ' ', text)
+    
+    # 5. Normalizar símbolos pegados a números (ej: 100% -> 100 %) 
+    text = re.sub(r'(\d)([%\$€£¥])', r'\1 \2', text)
+    text = re.sub(r'([%\$€£¥])(\d)', r'\1 \2', text)
+
+    # 6. Normalizar elipsis y repeticiones de puntuación
+    text = re.sub(r'\.{2,}', '.', text)
+    text = text.replace("…", ".")
+    text = re.sub(r'([!?])\1+', r'\1', text)
+    
+    # 7. Normalizar caracteres especiales (Comillas, Apóstrofes, Guiones)
+    text = text.replace("«", "\"").replace("»", "\"")
+    text = text.replace("’", "'").replace("‘", "'").replace("`", "'")
+    text = text.replace("“", "\"").replace("”", "\"")
+    text = re.sub(r'[-—–−=]{3,}', ' ', text)
+    text = re.sub(r'[—–−-]', '-', text)
+    
+    # 8. Limpiar símbolos de formato y separadores visuales
+    text = text.replace("*", "").replace("_", "").replace("#", "").replace("|", " ")
+
+    # 10. Evitar repeticiones excesivas de caracteres (ej: "aaaaa" -> "aaa")
+    text = re.sub(r'([a-zA-Z])\1{3,}', r'\1\1\1', text)
+
+    # 11. Protección contra "ruido digital" (strings de más de 70 letras sin espacios)
+    # Se sube a 70 para no borrar palabras técnicas o compuestas en alemán/otros
+    text = re.sub(r'\S{70,}', '', text)
+    
+    # 12. Eliminar caracteres de control y normalizar espacios finales
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    text = re.sub(r'[\u200b\u200e\u200f\u202f\u00a0]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+
 def split_text_into_chunks(text: str, max_chunk_size: int = CHUNK_SIZE) -> list[str]:
     """
     Split text into chunks at sentence boundaries for natural speech flow.
     """
     import re
     
-    # Normalize whitespace
-    text = ' '.join(text.split())
+    # Pre-procesar texto antes de dividir
+    text = preprocess_text(text)
+    
+    if not text:
+        return []
     
     if len(text) <= max_chunk_size:
         return [text]
     
-    # Split by sentence endings
-    sentences = re.split(r'(?<=[.!?。！？])\s+', text)
+    # Dividir por finales de oración incluyendo dos puntos y punto y coma para mejor flujo
+    # Incluimos los caracteres de puntuación dentro del chunk previo usando lookbehind
+    sentences = re.split(r'(?<=[.!?。！？:;])\s+', text)
     
     chunks = []
     current_chunk = ""
     
     for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
         if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
             current_chunk = f"{current_chunk} {sentence}".strip()
         else:
             if current_chunk:
                 chunks.append(current_chunk)
             
-            # Handle long sentences
+            # Manejar frases extremadamente largas
             if len(sentence) > max_chunk_size:
-                words = sentence.split()
+                # Intentar dividir por comas si la frase es demasiado larga
+                parts = re.split(r'(?<=,)\s+', sentence)
                 current_chunk = ""
-                for word in words:
-                    if len(current_chunk) + len(word) + 1 <= max_chunk_size:
-                        current_chunk = f"{current_chunk} {word}".strip()
+                for part in parts:
+                    if len(current_chunk) + len(part) + 1 <= max_chunk_size:
+                        current_chunk = f"{current_chunk} {part}".strip()
                     else:
                         if current_chunk:
                             chunks.append(current_chunk)
-                        current_chunk = word
+                        
+                        # Si aún una parte con coma es demasiado larga, dividir por palabras
+                        if len(part) > max_chunk_size:
+                            words = part.split()
+                            current_chunk = ""
+                            for word in words:
+                                if len(current_chunk) + len(word) + 1 <= max_chunk_size:
+                                    current_chunk = f"{current_chunk} {word}".strip()
+                                else:
+                                    if current_chunk:
+                                        chunks.append(current_chunk)
+                                    current_chunk = word
+                        else:
+                            current_chunk = part
             else:
                 current_chunk = sentence
     
@@ -322,9 +410,9 @@ def generate_audio(
     language_id: str,
     audio_prompt_path_input: str = None,
     exaggeration_input: float = 0.5,
-    temperature_input: float = 0.8,
+    temperature_input: float = 0.7,
     seed_num_input: int = 0,
-    cfg_weight_input: float = 0.5,
+    cfg_weight_input: float = 0.7,
     repetition_penalty_input: float = 2.0,
     min_p_input: float = 0.05,
     progress=gr.Progress()
@@ -581,12 +669,12 @@ with gr.Blocks() as demo:
             cfg_weight = gr.Slider(
                 0.2, 1, step=0.05, 
                 label="⚡ CFG/Pace", 
-                value=0.5
+                value=0.7
             )
 
             with gr.Accordion("⚙️ Advanced Options", open=False):
                 seed_num = gr.Number(value=0, label="Random Seed (0 = random)")
-                temp = gr.Slider(0.05, 5, step=0.05, label="Temperature", value=0.8)
+                temp = gr.Slider(0.05, 5, step=0.05, label="Temperature", value=0.7)
                 repetition_penalty = gr.Slider(1.0, 10.0, step=0.1, label="Repetition Penalty", value=2.0)
                 min_p = gr.Slider(0.01, 0.5, step=0.01, label="Min P", value=0.05)
 
