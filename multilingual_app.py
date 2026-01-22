@@ -21,6 +21,10 @@ USE_GPU_EMPTY_CACHE = False  # Cambiar a False para desactivar
 # --- LIMPIEZA DE CACHÉ ---
 AUTO_CLEAN_CACHE = True  # Cambiar a False para desactivar limpieza automática
 
+# --- CARPETA DE SALIDA PERSISTENTE ---
+OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 # === OPTIMIZACIONES DE RENDIMIENTO ===
 # Suprimir warnings no críticos para limpiar output
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -180,6 +184,23 @@ def get_supported_languages_display() -> str:
 
 {line2}
 """
+
+
+def open_output_folder():
+    """Opens the output folder in the system's file explorer."""
+    import subprocess
+    import platform
+    
+    try:
+        if platform.system() == "Darwin":  # macOS
+            subprocess.run(["open", OUTPUT_DIR], check=True)
+        elif platform.system() == "Windows":
+            subprocess.run(["explorer", OUTPUT_DIR], check=True)
+        else:  # Linux
+            subprocess.run(["xdg-open", OUTPUT_DIR], check=True)
+        return f"✅ Carpeta abierta: {OUTPUT_DIR}"
+    except Exception as e:
+        return f"❌ Error al abrir carpeta: {e}"
 
 
 def get_or_load_model():
@@ -453,10 +474,13 @@ def generate_audio(
     audio_int16 = (audio_numpy * 32767).astype(np.int16)
     del final_wav, audio_numpy
     
-    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    wavfile.write(temp_file.name, current_model.sr, audio_int16)
+    # Guardar audio en carpeta persistente con timestamp
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(OUTPUT_DIR, f"audio_{timestamp}.wav")
+    wavfile.write(output_path, current_model.sr, audio_int16)
     
-    print(f"📤 Audio guardado: {temp_file.name}")
+    print(f"📤 Audio guardado: {output_path}")
     print(f"   Tamaño: {len(audio_int16) * 2 / 1e6:.1f} MB")
     
     # Liberar memoria
@@ -503,7 +527,7 @@ def generate_audio(
 
     
     
-    return temp_file.name
+    return output_path
 
 
 
@@ -576,7 +600,15 @@ with gr.Blocks() as demo:
             
             run_btn = gr.Button("🚀 Generate Audio", variant="primary", size="lg")
             
-            audio_output = gr.Audio(label="🔊 Generated Audio")
+            open_folder_btn = gr.Button("� Open Output Folder", size="sm")
+            
+            audio_output = gr.Audio(label="� Generated Audio")
+            
+            open_folder_btn.click(
+                fn=open_output_folder,
+                inputs=[],
+                outputs=[]
+            )
 
     def on_language_change(lang, current_ref, current_text):
         return default_audio_for_ui(lang), default_text_for_ui(lang)
