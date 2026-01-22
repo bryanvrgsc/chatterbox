@@ -48,11 +48,34 @@ Choose the right model for your application.
 - **Drivers**: Latest NVIDIA drivers (560.94+ recommended)
 
 **Installation Steps for Windows 11:**
-1. Install Visual Studio 2022 Build Tools (required for PyTorch)
-2. Install CUDA Toolkit 13.1 or 12.6
-3. Install cuDNN 9.10+
-4. Update GPU drivers to latest version
-5. Follow installation instructions below
+
+1. **Install Visual Studio 2022 Build Tools** (required for PyTorch compilation)
+   - Download from [Visual Studio](https://visualstudio.microsoft.com/downloads/)
+   - Select "Desktop development with C++"
+
+2. **Install CUDA Toolkit 12.6+ or 13.0+**
+   - Download from [NVIDIA CUDA Downloads](https://developer.nvidia.com/cuda-downloads)
+   - Follow the installer instructions
+
+3. **Install cuDNN via Conda** (Recommended):
+   ```shell
+   conda install nvidia::cudnn cuda-version=12
+   ```
+   This will install cuDNN compatible with CUDA 12.x automatically.
+
+4. **Install PyTorch with CUDA 12.4 Support**:
+   ```shell
+   pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+   ```
+   
+   > **Note**: This PyTorch version (2.6.0 with CUDA 12.4) is fully compatible with Chatterbox and provides excellent performance on Windows 11.
+
+5. **Update GPU drivers** to latest version from [NVIDIA Drivers](https://www.nvidia.com/download/index.aspx)
+
+6. **Verify Installation**:
+   ```shell
+   python check_gpu.py
+   ```
 
 #### macOS (Apple Silicon)
 - **Hardware**: M1, M2, M3, or M4 chip
